@@ -1,3 +1,8 @@
+2002-09-29  Scott Goodwin  <scott@scottg.net>
+
+	* tclcache.c: Integrated Vlad Seryakov's changes: added ns_cache
+	incr command, similar to nsv_incr.
+
 2002-09-28  Scott Goodwin  <scott@scottg.net>
 
 	* nscache: Initial import. Added this ChangeLog.

@@ -27,6 +27,9 @@
  * version of this file under either the License or the GPL.
  */
 
+/*
+ *   Added ns_cache incr command, Vlad Seryakov vlad@crystalballinc.com
+ */
 
 /* 
  * tclcache.c --
@@ -53,6 +56,7 @@ typedef struct {
     TclCacheCmdProc *getPtr;
     TclCacheCmdProc *namesPtr;
     TclCacheCmdProc *setPtr;
+    TclCacheCmdProc *incrPtr;
 } TclCache;
 
 typedef struct {
@@ -105,10 +109,12 @@ static int CreateGlobalCache(Tcl_Interp *interp, char *name,
 static TclCacheCmdProc ThreadCacheEvalCmd;
 static TclCacheCmdProc ThreadCacheGetCmd;
 static TclCacheCmdProc ThreadCacheSetCmd;
+static TclCacheCmdProc ThreadCacheIncrCmd;
 
 static TclCacheCmdProc GlobalCacheEvalCmd;
 static TclCacheCmdProc GlobalCacheGetCmd;
 static TclCacheCmdProc GlobalCacheSetCmd;
+static TclCacheCmdProc GlobalCacheIncrCmd;
 
 static TclCacheCmdProc FlushCmd;
 static TclCacheCmdProc NamesCmd;
@@ -210,6 +216,7 @@ GetThreadCache(char *name, TclCacheInfo *info)
 	cache->getPtr = ThreadCacheGetCmd;
 	cache->namesPtr = NamesCmd;
 	cache->setPtr = ThreadCacheSetCmd;
+        cache->incrPtr = ThreadCacheIncrCmd;
 
 	Ns_TlsSet(&info->tls, cache);
     }
@@ -352,6 +359,7 @@ CreateGlobalCache(Tcl_Interp *interp, char *name, int maxSize,
     iPtr->globalCache->getPtr = GlobalCacheGetCmd;
     iPtr->globalCache->namesPtr = NamesCmd;
     iPtr->globalCache->setPtr = GlobalCacheSetCmd;
+    iPtr->globalCache->incrPtr = GlobalCacheIncrCmd;
 
     Tcl_SetHashValue(hPtr, iPtr);
 
@@ -891,6 +899,58 @@ GlobalCacheSetCmd(Ns_Cache *cache, int needsLocking, Tcl_Interp *interp,
 /*
  *----------------------------------------------------------------------
  *
+ * GlobalCacheIncrCmd --
+ *
+ *	Increases the value by specified key in the cache, creates new entry
+ *      if does not exist
+ *
+ * Results:
+ *	TCL_OK
+ *
+ * Side effects:
+ *	None.
+ *
+ *----------------------------------------------------------------------
+ */
+
+static int
+GlobalCacheIncrCmd(Ns_Cache *cache, int needsLocking, Tcl_Interp *interp,
+    int objc, Tcl_Obj * CONST objv[])
+{
+    int         incr = 1;
+    char        buf[20];
+    Ns_Entry    *ePtr;
+    GlobalValue *vPtr;
+
+    if (objc < 4) {
+	Tcl_AppendResult(interp, "wrong # args: should be \"",
+		    Tcl_GetString(objv[0]), " ",
+		    Tcl_GetString(objv[1]), " cache key ?value?\"", NULL);
+        return TCL_ERROR;
+    }
+
+    if (objc > 4 && Tcl_GetIntFromObj(interp,objv[4],&incr) != TCL_OK) {
+       return TCL_ERROR;
+    }
+
+    Ns_CacheLock(cache);
+
+    ePtr = GetGlobalEntry(cache, Tcl_GetString(objv[3]), 1);
+    vPtr = (GlobalValue *)Ns_CacheGetValue(ePtr);
+    sprintf(buf,"%d",(vPtr->value ? atoi(vPtr->value) : 0) + incr);
+    ns_free(vPtr->value);
+    vPtr->value = ns_strdup(buf);
+    vPtr->length = strlen(buf);
+
+    Ns_CacheUnlock(cache);
+
+    Tcl_SetStringObj(Tcl_GetObjResult(interp), vPtr->value, vPtr->length);
+    return TCL_OK;
+}
+
+/*
+ *----------------------------------------------------------------------
+ *
  * ThreadCacheGetCmd --
  *
  *      Get a value from the cache given a key.
@@ -1073,6 +1133,61 @@ ThreadCacheSetCmd(Ns_Cache *cache, int needsLocking, Tcl_Interp *interp,
 /*
  *----------------------------------------------------------------------
  *
+ * ThreadCacheIncrCmd --
+ *
+ *	Increases the value by specified key in the cache, creates new entry
+ *      if does not exist
+ *       *
+ * Results:
+ *	TCL_OK
+ *
+ * Side effects:
+ *	None.
+ *
+ *----------------------------------------------------------------------
+ */
+
+static int
+ThreadCacheIncrCmd(Ns_Cache *cache, int needsLocking, Tcl_Interp *interp,
+    int objc, Tcl_Obj * CONST objv[])
+{
+    int       incr = 1;
+    int       length;
+    int       new;
+    int       iVal;
+    Tcl_Obj  *oPtr;
+    Ns_Entry *ePtr;
+
+    if (objc < 4) {
+	Tcl_AppendResult(interp, "wrong # args: should be \"",
+		    Tcl_GetString(objv[0]), " ",
+		    Tcl_GetString(objv[1]), " cache key ?value?\"", NULL);
+        return TCL_ERROR;
+    }
+
+    if (objc > 4 && Tcl_GetIntFromObj(interp,objv[4],&incr) != TCL_OK) {
+       return TCL_ERROR;
+    }
+
+    ePtr = Ns_CacheCreateEntry(cache,Tcl_GetString(objv[3]),&new);
+    if (new) {
+      oPtr = Tcl_NewLongObj(1);
+      Tcl_IncrRefCount(oPtr);
+      Tcl_GetStringFromObj(oPtr, &length);
+      Ns_CacheSetValueSz(ePtr, oPtr, length);
+    } else {
+      oPtr = (Tcl_Obj *)Ns_CacheGetValue(ePtr);
+      if (Tcl_GetIntFromObj(interp,oPtr,&iVal) != TCL_OK) return TCL_ERROR;
+      Tcl_SetLongObj(oPtr, (iVal + incr));
+    }
+
+    Tcl_SetObjResult(interp, oPtr);
+    return TCL_OK;
+}
+
+/*
+ *----------------------------------------------------------------------
+ *
  * NsTclCacheCmd --
  *
  *	Execute a Tcl ns_cache command.
@@ -1114,6 +1229,7 @@ NsTclCacheCmd(ClientData dummy, Tcl_Interp *interp, int objc,
 	|| STREQ(cmd, "get")
 	|| STREQ(cmd, "names")
 	|| STREQ(cmd, "set")
+        || STREQ(cmd, "incr")
     ) {
 	if (objc < 3) {
 	    Tcl_AppendResult(interp, "missing cache name for ",
@@ -1135,6 +1251,7 @@ NsTclCacheCmd(ClientData dummy, Tcl_Interp *interp, int objc,
 	case 'g': procPtr = cache->getPtr;   break;
 	case 'n': procPtr = cache->namesPtr; break;
 	case 's': procPtr = cache->setPtr;   break;
+        case 'i': procPtr = cache->incrPtr;   break;
 	}
 
 	return (*procPtr)(cache->nscache, needsLocking, interp, objc, objv);
