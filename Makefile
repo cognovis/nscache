@@ -44,17 +44,17 @@ test:
 
 release:
 	@if [ "$$VER" = "" ]; then echo 1>&2 "VER must be set to version number!"; exit 1; fi
-	cvs rtag -r stable release-$(VER_) nscache
+	cvs rtag -r v$(VER_) nscache
 
 force-release:
 	@if [ "$$VER" = "" ]; then echo 1>&2 "VER must be set to version number!"; exit 1; fi
-	cvs rtag -F -r stable release-$(VER_) nscache
+	cvs rtag -F v$(VER_) nscache
 
 dist:
 	@if [ "$$VER" = "" ]; then echo 1>&2 "VER must be set to version number!"; exit 1; fi
 	rm -rf work
 	mkdir work
-	cd work && cvs co -r release-$(VER_) nscache
+	cd work && cvs co -r v$(VER_) nscache
 	perl -pi -e 's/\@VER\@/$(VER)/g' work/nscache/index.html work/nscache/tclcache.c
 	mv work/nscache work/nscache-$(VER)
 	( cd work && tar cvf - nscache-$(VER) ) | gzip -9 > nscache-$(VER).tar.gz

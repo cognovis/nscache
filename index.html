@@ -32,7 +32,7 @@
 	<ul>
 	    <li><a href='#cmd-create'><code>ns_cache create <i>cachename</i>
 		?-size <i>maxsize</i>? ?-timeout <i>timeout</i>?
-		?-thread <i>boolean</i> | -common <i>boolean</i>?</code></a>
+		?-thread <i>boolean</i> | -serverwide <i>boolean</i>?</code></a>
 	    <li><a href='#cmd-eval'><code>ns_cache eval <i>cachename</i> <i>key</i>
 		<i>script</i></code></a>
 	    <li><a href='#cmd-flush'><code>ns_cache flush <i>cachename</i> <i>key</i></code></a>
@@ -56,7 +56,7 @@
 	<dd>
 
 	<blockquote><pre>ns_cache create <i>cachename</i> -size <i>maxsize</i></pre></blockquote>
-	<blockquote><pre>ns_cache create <i>cachename</i> -size <i>maxsize</i> -common 1</pre></blockquote>
+	<blockquote><pre>ns_cache create <i>cachename</i> -size <i>maxsize</i> -serverwide 1</pre></blockquote>
 
 	<p> Entries in a cache of this type are accessible to all
 	threads.  Each cache has its own mutex that protects access to
@@ -76,7 +76,7 @@
 	below the maximum size (or until only the new value remains in
 	the cache).
 
-    <p> Caches created with "-common" option are common to all
+    <p> Caches created with "-serverwide" option are common to all
     virtual servers in the process, whereas caches created 
     without this option are attached to the current virtual server.
 
@@ -85,7 +85,7 @@
 	<dd>
 
 	<blockquote><pre>ns_cache create <i>cachename</i> -timeout <i>timeout</i></pre></blockquote>
-	<blockquote><pre>ns_cache create <i>cachename</i> -timeout <i>timeout</i> -common 1</pre></blockquote>
+	<blockquote><pre>ns_cache create <i>cachename</i> -timeout <i>timeout</i> -serverwide 1</pre></blockquote>
 
 	<p> Entries in a cache of this type are accessible to all
 	threads.  Each cache has its own mutex that protects access to
@@ -100,7 +100,7 @@
 	seconds, AOLserver flushes all cache entries that have not were
 	not created or accessed in the last <i>timeout</i> seconds.
 
-    <p> Caches created with "-common" option are common to all
+    <p> Caches created with "-serverwide" option are common to all
     virtual servers in the process, whereas caches created 
     without this option are attached to the current virtual server.
 

@@ -491,7 +491,7 @@ CreateCmd(Tcl_Interp *interp, Server *servPtr, int objc, Tcl_Obj * CONST objv[])
 
 	    if (common != -1) {
 		Tcl_AppendResult(interp, arg,
-		    " may not be used together with -common option", NULL);
+		    " may not be used together with -serverwide option", NULL);
 		return TCL_ERROR;
 	    }
 
@@ -504,7 +504,7 @@ CreateCmd(Tcl_Interp *interp, Server *servPtr, int objc, Tcl_Obj * CONST objv[])
 	    obji++;
 	}
 
-	else if (STREQ(arg, "-common")) {
+	else if (STREQ(arg, "-serverwide")) {
 	    if (obji + 1 >= objc) {
 		Tcl_AppendResult(interp, arg,
 		    " requires an argument", NULL);
@@ -536,7 +536,7 @@ CreateCmd(Tcl_Interp *interp, Server *servPtr, int objc, Tcl_Obj * CONST objv[])
 	    Tcl_AppendResult(interp, "unknown flag ", arg, "; should be \"",
 		Tcl_GetString(objv[0]), " ", Tcl_GetString(objv[1]),
 		" cache-name ?-size size? ?-timeout timeout?"
-        " ?-thread boolean | -common boolean?", NULL);
+        " ?-thread boolean | -serverwide boolean?", NULL);
 	    return TCL_ERROR;
 	}
     }
