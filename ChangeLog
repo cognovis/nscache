@@ -1,3 +1,10 @@
+2003-03-16  Zoran Vasiljevic <zoran@archiware.com>
+
+	* tclcache.c: Integrated Don Baccus changes for virtual servers.
+ 	  Added support for common process-wide caches.
+
+	* intex.html: updated docs
+
 2002-09-29  Scott Goodwin  <scott@scottg.net>
 
 	* nscache: Released as nscache 1.4

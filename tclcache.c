@@ -1,3 +1,4 @@
+
 /*
  * The contents of this file are subject to the AOLserver Public License
  * Version 1.1 (the "License"); you may not use this file except in
@@ -29,12 +30,18 @@
 
 /*
  *   Added ns_cache incr command, Vlad Seryakov vlad@crystalballinc.com
+ *
+ *   2003-03-13: Don Baccus dhogaza@pacifier.com
+ *               Added virtual server support and cleaned up warnings
+ *
+ *   2003-03-16: Zoran Vasiljevic zoran@archiware.com
+ *               Added support for process-wide caches
  */
 
 /* 
  * tclcache.c --
  *
- *	Tcl API for cache.c.  Only works in nsd8x.
+ *	Tcl API for cache.c.  Only works in nsd8x and AOLserver 4x and better.
  */
 
 static const char *RCSID = "@(#) $Header$, compiled: " __DATE__ " " __TIME__;
@@ -84,26 +91,34 @@ typedef struct {
 
 } GlobalValue;
 
+/* Each virtual server gets its own cache and lock */
+
+typedef struct {
+    Tcl_HashTable tclCaches;
+    Ns_Mutex lock;
+} Server;
+
 /* Global symbols */
 
 int Ns_ModuleVersion = 1;
+
+/* Common cache, used for all virtual servers */
+static Server *commonCache;
 
 int Ns_ModuleInit(char *server, char *module);
 
 /* Private symbols */
 
-static Tcl_HashTable tclCaches;
-static Ns_Mutex lock;
-
 static int CacheInterpInit(Tcl_Interp *interp, void *context);
 static Tcl_ObjCmdProc NsTclCacheCmd;
 
-static TclCache *TclCacheFind(char *name, int *needsLockingPtr);
+static TclCache *TclCacheFind(Server *servPtr, char *name, int *needsLockingPtr);
+static TclCache *CacheFind(Server *servPtr, char *name, int *needsLockingPtr);
 static TclCache *GetThreadCache(char *name, TclCacheInfo *info);
 
-static int CreateCmd(Tcl_Interp *interp, int objc, Tcl_Obj * CONST objv[]);
-static int CreateThreadCache(Tcl_Interp *interp, char *name, int maxSize);
-static int CreateGlobalCache(Tcl_Interp *interp, char *name,
+static int CreateCmd(Tcl_Interp *interp, Server *servPtr, int objc, Tcl_Obj * CONST objv[]);
+static int CreateThreadCache(Tcl_Interp *interp, Server *servPtr, char *name, int maxSize);
+static int CreateGlobalCache(Tcl_Interp *interp, Server *servPtr, char *name,
     int maxSize, int timeout);
 
 static TclCacheCmdProc ThreadCacheEvalCmd;
@@ -127,7 +142,7 @@ static Ns_TlsCleanup CleanupThreadCache;
 static Ns_Entry *GetGlobalEntry(Ns_Cache *cache, char *key, int create);
 static int CompleteEntryP(Ns_Entry *entry);
 
-
+
 /*
  *----------------------------------------------------------------------
  *
@@ -136,32 +151,61 @@ static int CompleteEntryP(Ns_Entry *entry);
  *	Initialize this module.
  *
  * Results:
- *	None.
+ *	Standard AOLserver return code..
  *
  * Side effects:
- *	None.
+ *	On very first invocation, create and initialize process-wide
+ *  descriptor handling common caches.
  *
  *----------------------------------------------------------------------
  */
 int
 Ns_ModuleInit(char *server, char *module)
 {
-    Ns_Log(Notice, "nscache module version @VER@");
-    Tcl_InitHashTable(&tclCaches, TCL_STRING_KEYS);
-    Ns_MutexSetName2(&lock, "ns", "tclCaches");
-    return Ns_TclInitInterps(server, CacheInterpInit, NULL);
+    static int initCommon = 0;
+    Server *servPtr;
+
+    Ns_Log(Notice, "nscache module version @VER@ server: %s", server);
+
+    /*
+     * Initialize cache descriptor for process-wide caches
+     */
+
+    if (initCommon == 0) {
+        Ns_MasterLock();
+        if (initCommon == 0) {
+            commonCache = ns_malloc(sizeof(Server));
+            Tcl_InitHashTable(&commonCache->tclCaches, TCL_STRING_KEYS);
+            Ns_MutexInit(&commonCache->lock);
+            Ns_MutexSetName(&commonCache->lock, "nscache:commonTclCaches");
+            initCommon = 1;
+        }
+        Ns_MasterUnlock();
+    }
+
+    /*
+     * Initialize per-virtual-server cache descriptor
+     */
+
+    servPtr = ns_malloc(sizeof(Server));
+    Tcl_InitHashTable(&servPtr->tclCaches, TCL_STRING_KEYS);
+    Ns_MutexInit(&servPtr->lock);
+    Ns_MutexSetName2(&servPtr->lock, "nscache:tclCaches", server);
+    Ns_TclInitInterps(server, (Ns_TclInterpInitProc *) CacheInterpInit,
+            (void *) servPtr);
+
+    return NS_OK;
 }
 
-
 /*
  *----------------------------------------------------------------------
  *
  * CacheInterpInit --
  *
- *	Add ns_cache commands to interp.
+ *	Add ns_cache commands to the given interp.
  *
  * Results:
- *	None.
+ *	Standard AOLserver return code.
  *
  * Side effects:
  *	None.
@@ -171,9 +215,12 @@ Ns_ModuleInit(char *server, char *module)
 static int
 CacheInterpInit(Tcl_Interp *interp, void *context)
 {
-    Tcl_CreateObjCommand(interp, "ns_cache", NsTclCacheCmd, NULL, NULL);
+    Tcl_Command cacheCmd;
 
-    return NS_OK;
+    cacheCmd = Tcl_CreateObjCommand(interp, "ns_cache", NsTclCacheCmd,
+            (ClientData) context, NULL);
+
+    return (cacheCmd != NULL) ? NS_OK : NS_ERROR;
 }
 
 /*
@@ -181,8 +228,10 @@ CacheInterpInit(Tcl_Interp *interp, void *context)
  *
  * GetThreadCache --
  *
+ *  Locate the per-thread cache.
+ *
  * Results:
- *	A cache private to the current thread.
+ *	A cache private to the current thread and virtual server.
  *
  * Side effects:
  *	A new cache may be allocated.
@@ -209,7 +258,7 @@ GetThreadCache(char *name, TclCacheInfo *info)
 	Ns_DStringAppend(&ds, tid);
 
 	cache->nscache = Ns_CacheCreateSz(Ns_DStringValue(&ds),
-	    TCL_STRING_KEYS, info->maxSize, ThreadValueFree);
+	    TCL_STRING_KEYS, (size_t) info->maxSize, ThreadValueFree);
 
 	cache->evalPtr = ThreadCacheEvalCmd;
 	cache->flushPtr = FlushCmd;
@@ -229,10 +278,12 @@ GetThreadCache(char *name, TclCacheInfo *info)
  *
  * TclCacheFind --
  *
+ *  Locates the named cache for the given virtual server.
+ *
  * Results:
  *	The appropriate cache (global or thread-private) for the
- *      specified name.  If the cache is global, sets *globalPtr to
- *      NS_TRUE, else sets it to NS_FALSE.
+ *  specified name.  If the cache is global, sets *globalPtr to
+ *  NS_TRUE, else sets it to NS_FALSE.
  *
  * Side effects:
  *	A new thread-private cache may be created.
@@ -241,25 +292,14 @@ GetThreadCache(char *name, TclCacheInfo *info)
  */
 
 static TclCache *
-TclCacheFind(char *name, int *needsLockingPtr)
+TclCacheFind(Server *servPtr, char *name, int *needsLockingPtr)
 {
-    Tcl_HashEntry *hPtr;
-    TclCacheInfo  *info;
-    TclCache      *cache = NULL;
-
-    Ns_MutexLock(&lock);
-    hPtr = Tcl_FindHashEntry(&tclCaches, name);
-    if (hPtr != NULL) {
-	info = (TclCacheInfo *) Tcl_GetHashValue(hPtr);
-	if (info->globalCache != NULL) {
-	    cache = info->globalCache;
-	    *needsLockingPtr = NS_TRUE;
-	} else {
-	    cache = GetThreadCache(name, info);
-	    *needsLockingPtr = NS_FALSE;
-	}
+    TclCache *cache = NULL;
+    
+    cache = CacheFind(servPtr, name, needsLockingPtr);
+    if (cache == NULL) {
+        cache = CacheFind(commonCache, name, needsLockingPtr);
     }
-    Ns_MutexUnlock(&lock);
 
     return cache;
 }
@@ -270,7 +310,7 @@ TclCacheFind(char *name, int *needsLockingPtr)
  * CreateThreadCache --
  *
  *	Create a thread cache.  Actually, just create the TclCacheInfo
- *      for it.
+ *  for it.
  *
  * Results:
  *	TCL result.
@@ -282,20 +322,20 @@ TclCacheFind(char *name, int *needsLockingPtr)
  */
 
 static int
-CreateThreadCache(Tcl_Interp *interp, char *name, int maxSize)
+CreateThreadCache(Tcl_Interp *interp, Server *servPtr, char *name, int maxSize)
 {
     TclCacheInfo  *iPtr;
     Tcl_HashEntry *hPtr;
     int            new;
 
-    Ns_MutexLock(&lock);
+    Ns_MutexLock(&servPtr->lock);
 
-    hPtr = Tcl_CreateHashEntry(&tclCaches, name, &new);
+    hPtr = Tcl_CreateHashEntry(&servPtr->tclCaches, name, &new);
     if (!new) {
 	Tcl_AppendResult(interp, "a cache named ", name,
 	    " already exists", NULL);
 
-	Ns_MutexUnlock(&lock);
+	Ns_MutexUnlock(&servPtr->lock);
 	return TCL_ERROR;
     }
 
@@ -306,7 +346,7 @@ CreateThreadCache(Tcl_Interp *interp, char *name, int maxSize)
 
     Tcl_SetHashValue(hPtr, iPtr);
 
-    Ns_MutexUnlock(&lock);
+    Ns_MutexUnlock(&servPtr->lock);
     return TCL_OK;
 }
 
@@ -327,21 +367,21 @@ CreateThreadCache(Tcl_Interp *interp, char *name, int maxSize)
  */
 
 static int
-CreateGlobalCache(Tcl_Interp *interp, char *name, int maxSize,
+CreateGlobalCache(Tcl_Interp *interp, Server *servPtr, char *name, int maxSize,
     int timeout)
 {
     TclCacheInfo  *iPtr;
     Tcl_HashEntry *hPtr;
     int            new;
 
-    Ns_MutexLock(&lock);
+    Ns_MutexLock(&servPtr->lock);
 
-    hPtr = Tcl_CreateHashEntry(&tclCaches, name, &new);
+    hPtr = Tcl_CreateHashEntry(&servPtr->tclCaches, name, &new);
     if (!new) {
 	Tcl_AppendResult(interp, "a cache named ", name,
 	    " already exists", NULL);
 
-	Ns_MutexUnlock(&lock);
+	Ns_MutexUnlock(&servPtr->lock);
 	return TCL_ERROR;
     }
 
@@ -349,7 +389,7 @@ CreateGlobalCache(Tcl_Interp *interp, char *name, int maxSize,
     iPtr->globalCache = ns_malloc(sizeof *iPtr->globalCache);
     if (maxSize > 0) {
 	iPtr->globalCache->nscache = Ns_CacheCreateSz(name,
-	    TCL_STRING_KEYS, maxSize, GlobalValueFree);
+	    TCL_STRING_KEYS, (size_t) maxSize, GlobalValueFree);
     } else {
 	iPtr->globalCache->nscache = Ns_CacheCreate(name,
 	    TCL_STRING_KEYS, timeout, GlobalValueFree);
@@ -363,7 +403,7 @@ CreateGlobalCache(Tcl_Interp *interp, char *name, int maxSize,
 
     Tcl_SetHashValue(hPtr, iPtr);
 
-    Ns_MutexUnlock(&lock);
+    Ns_MutexUnlock(&servPtr->lock);
     return TCL_OK;
 }
 
@@ -385,13 +425,14 @@ CreateGlobalCache(Tcl_Interp *interp, char *name, int maxSize,
  */
 
 static int
-CreateCmd(Tcl_Interp *interp, int objc, Tcl_Obj * CONST objv[])
+CreateCmd(Tcl_Interp *interp, Server *servPtr, int objc, Tcl_Obj * CONST objv[])
 {
     int        obji, n;
     char      *arg;
     int        maxSize = -1;
     int        timeout = -1;
-    int        thread = -1;
+    int        thread  = -1;
+    int        common  = -1;
     char      *name;
 
     if (objc < 3) {
@@ -448,7 +489,41 @@ CreateCmd(Tcl_Interp *interp, int objc, Tcl_Obj * CONST objv[])
 		return TCL_ERROR;
 	    }
 
+	    if (common != -1) {
+		Tcl_AppendResult(interp, arg,
+		    " may not be used together with -common option", NULL);
+		return TCL_ERROR;
+	    }
+
 	    if (Tcl_GetBooleanFromObj(interp, objv[obji+1], &thread)
+		!= TCL_OK)
+	    {
+		return TCL_ERROR;
+	    }
+
+	    obji++;
+	}
+
+	else if (STREQ(arg, "-common")) {
+	    if (obji + 1 >= objc) {
+		Tcl_AppendResult(interp, arg,
+		    " requires an argument", NULL);
+		return TCL_ERROR;
+	    }
+
+	    if (common != -1) {
+		Tcl_AppendResult(interp, arg,
+		    " may only be given once", NULL);
+		return TCL_ERROR;
+	    }
+
+	    if (thread != -1) {
+		Tcl_AppendResult(interp, arg,
+		    " may not be used together with -thread option", NULL);
+		return TCL_ERROR;
+	    }
+
+	    if (Tcl_GetBooleanFromObj(interp, objv[obji+1], &common)
 		!= TCL_OK)
 	    {
 		return TCL_ERROR;
@@ -460,8 +535,8 @@ CreateCmd(Tcl_Interp *interp, int objc, Tcl_Obj * CONST objv[])
 	else {
 	    Tcl_AppendResult(interp, "unknown flag ", arg, "; should be \"",
 		Tcl_GetString(objv[0]), " ", Tcl_GetString(objv[1]),
-		" cache-name ?-size size? ?-timeout timeout? ?-thread boolean?",
-		NULL);
+		" cache-name ?-size size? ?-timeout timeout?"
+        " ?-thread boolean | -common boolean?", NULL);
 	    return TCL_ERROR;
 	}
     }
@@ -477,18 +552,26 @@ CreateCmd(Tcl_Interp *interp, int objc, Tcl_Obj * CONST objv[])
 	thread = 0;
     }
 
+    if (common < 0) {
+	common = 0;
+    }
+
     if (thread && timeout > 0) {
 	Tcl_AppendResult(interp,
 	    "thread-private cache cannot have a timeout", NULL);
 	return TCL_ERROR;
     }
 
-    if (thread) {
-	return CreateThreadCache(interp, name, maxSize);
+    if (common) {
+	return CreateGlobalCache(interp, commonCache, name, maxSize, timeout);
+    }
+    
+    else if (thread) {
+	return CreateThreadCache(interp, servPtr, name, maxSize);
     }
 
     else {
-	return CreateGlobalCache(interp, name, maxSize, timeout);
+	return CreateGlobalCache(interp, servPtr, name, maxSize, timeout);
     }
 }
 
@@ -620,16 +703,16 @@ CompleteEntryP(Ns_Entry *ePtr)
  * GetGlobalEntry --
  *
  *	Given a locked global cache and a key, get the cache entry.
- *      If the key is not found and create is set, then create a new,
- *      incomplete entry and return it.  If the key is not found and
- *      create is not set, then return NULL.  If the key is found but
- *      the entry is incomplete, wait until the entry is complete or
- *      deleted.  If the key is found and the entry is complete, return
- *       it.
+ *  If the key is not found and create is set, then create a new,
+ *  incomplete entry and return it.  If the key is not found and
+ *  create is not set, then return NULL.  If the key is found but
+ *  the entry is incomplete, wait until the entry is complete or
+ *  deleted.
+ *  If the key is found and the entry is complete, return it.
  *
  * Results:
  *	If create is set, a new or complete cache entry.
- *      If create is not set, NULL or a complete cache entry.
+ *  If create is not set, NULL or a complete cache entry.
  *
  * Side effects:
  *	None.
@@ -682,9 +765,9 @@ GetGlobalEntry(Ns_Cache *cache, char *key, int create)
  *
  * GlobalCacheGetCmd --
  *
- *      Get a value from the cache given a key. If some other thread is
- *      currently in an eval for the same cache and key, block until
- *      that thread finishes, then use the value it computed.
+ *  Get a value from the cache given a key. If some other thread is
+ *  currently in an eval for the same cache and key, block until
+ *  that thread finishes, then use the value it computed.
  *
  * Results:
  *	TCL result.
@@ -768,10 +851,10 @@ GlobalCacheGetCmd(Ns_Cache *cache, int needsLocking, Tcl_Interp *interp,
  * GlobalCacheEvalCmd --
  *
  *	Get a value from the cache given a key.  If the key is not in
- *      the cache, evaluate the code block and store its result as the
- *      value for the key.  If some other thread is currently in an
- *      eval for the same cache and key, block until that thread
- *      finishes, then use the value it computed.
+ *  the cache, evaluate the code block and store its result as the
+ *  value for the key.  If some other thread is currently in an
+ *  eval for the same cache and key, block until that thread
+ *  finishes, then use the value it computed.
  *
  * Results:
  *	TCL result.
@@ -822,9 +905,9 @@ GlobalCacheEvalCmd(Ns_Cache *cache, int needsLocking, Tcl_Interp *interp,
 	    } else {
 		string = Tcl_GetStringFromObj(Tcl_GetObjResult(interp),
 		    &length);
-		Ns_CacheSetValueSz(ePtr, vPtr, length);
-		vPtr->value = ns_malloc(length);
-		memcpy(vPtr->value, string, length);
+		Ns_CacheSetValueSz(ePtr, vPtr, (size_t) length);
+		vPtr->value = ns_malloc((size_t) length);
+		memcpy(vPtr->value, string, (size_t) length);
 		vPtr->length = length;
 		vPtr->flushed = 0;
 	    }
@@ -852,7 +935,7 @@ GlobalCacheEvalCmd(Ns_Cache *cache, int needsLocking, Tcl_Interp *interp,
  * GlobalCacheSetCmd --
  *
  *	Store the key/value pair in the cache, flushing any previous
- *      value for the key.
+ *  value for the key.
  *
  * Results:
  *	TCL_OK
@@ -883,13 +966,13 @@ GlobalCacheSetCmd(Ns_Cache *cache, int needsLocking, Tcl_Interp *interp,
     key = Tcl_GetString(objv[3]);
     vPtr = ns_malloc(sizeof *vPtr);
     value = Tcl_GetStringFromObj(objv[4], &vPtr->length);
-    vPtr->value = ns_malloc(vPtr->length);
-    memcpy(vPtr->value, value, vPtr->length);
+    vPtr->value = ns_malloc((size_t) vPtr->length);
+    memcpy(vPtr->value, value, (size_t) vPtr->length);
 
     Ns_CacheLock(cache);
 
     ePtr = Ns_CacheCreateEntry(cache, key, &new);
-    Ns_CacheSetValueSz(ePtr, vPtr, vPtr->length);
+    Ns_CacheSetValueSz(ePtr, vPtr, (size_t) vPtr->length);
 
     Ns_CacheUnlock(cache);
 
@@ -902,7 +985,7 @@ GlobalCacheSetCmd(Ns_Cache *cache, int needsLocking, Tcl_Interp *interp,
  * GlobalCacheIncrCmd --
  *
  *	Increases the value by specified key in the cache, creates new entry
- *      if does not exist
+ *  if does not exist
  *
  * Results:
  *	TCL_OK
@@ -953,7 +1036,7 @@ GlobalCacheIncrCmd(Ns_Cache *cache, int needsLocking, Tcl_Interp *interp,
  *
  * ThreadCacheGetCmd --
  *
- *      Get a value from the cache given a key.
+ *  Get a value from the cache given a key.
  *
  * Results:
  *	TCL result.
@@ -1030,8 +1113,8 @@ ThreadCacheGetCmd(Ns_Cache *cache, int needsLocking, Tcl_Interp *interp,
  * ThreadCacheEvalCmd --
  *
  *	Get a value from the cache given a key.  If the key is not in
- *      the cache, evaluate the code block and store its result as the
- *      value for the key.
+ *  the cache, evaluate the code block and store its result as the
+ *  value for the key.
  *
  * Results:
  *	TCL result.
@@ -1069,7 +1152,7 @@ ThreadCacheEvalCmd(Ns_Cache *cache, int needsLocking, Tcl_Interp *interp,
 	    resultPtr = Tcl_GetObjResult(interp);
 	    Tcl_GetStringFromObj(resultPtr, &length);
 	    Tcl_IncrRefCount(resultPtr);
-	    Ns_CacheSetValueSz(ePtr, resultPtr, length);
+	    Ns_CacheSetValueSz(ePtr, resultPtr, (size_t) length);
 	    status = TCL_OK;
 	}
 
@@ -1093,7 +1176,7 @@ ThreadCacheEvalCmd(Ns_Cache *cache, int needsLocking, Tcl_Interp *interp,
  * ThreadCacheSetCmd --
  *
  *	Store the key/value pair in the cache, flushing any previous
- *      value for the key.
+ *  value for the key.
  *
  * Results:
  *	TCL_OK
@@ -1125,7 +1208,7 @@ ThreadCacheSetCmd(Ns_Cache *cache, int needsLocking, Tcl_Interp *interp,
     ePtr = Ns_CacheCreateEntry(cache, Tcl_GetString(objv[3]), &new);
     Tcl_GetStringFromObj(value, &length);
     Tcl_IncrRefCount(value);
-    Ns_CacheSetValueSz(ePtr, value, length);
+    Ns_CacheSetValueSz(ePtr, value, (size_t) length);
 
     return TCL_OK;
 }
@@ -1136,8 +1219,8 @@ ThreadCacheSetCmd(Ns_Cache *cache, int needsLocking, Tcl_Interp *interp,
  * ThreadCacheIncrCmd --
  *
  *	Increases the value by specified key in the cache, creates new entry
- *      if does not exist
- *       *
+ *  if does not exist
+ *
  * Results:
  *	TCL_OK
  *
@@ -1174,7 +1257,7 @@ ThreadCacheIncrCmd(Ns_Cache *cache, int needsLocking, Tcl_Interp *interp,
       oPtr = Tcl_NewLongObj(1);
       Tcl_IncrRefCount(oPtr);
       Tcl_GetStringFromObj(oPtr, &length);
-      Ns_CacheSetValueSz(ePtr, oPtr, length);
+      Ns_CacheSetValueSz(ePtr, oPtr, (size_t) length);
     } else {
       oPtr = (Tcl_Obj *)Ns_CacheGetValue(ePtr);
       if (Tcl_GetIntFromObj(interp,oPtr,&iVal) != TCL_OK) return TCL_ERROR;
@@ -1202,13 +1285,14 @@ ThreadCacheIncrCmd(Ns_Cache *cache, int needsLocking, Tcl_Interp *interp,
  */
 
 static int
-NsTclCacheCmd(ClientData dummy, Tcl_Interp *interp, int objc,
+NsTclCacheCmd(ClientData arg, Tcl_Interp *interp, int objc,
     Tcl_Obj * CONST objv[])
 {
     char            *cmd;
     TclCache        *cache;
     int              needsLocking;
-    TclCacheCmdProc *procPtr;
+    TclCacheCmdProc *procPtr = NULL;
+    Server *servPtr = arg;
 
     if (objc < 2) {
 	Tcl_AppendResult(interp, "usage: ", Tcl_GetString(objv[0]),
@@ -1220,7 +1304,7 @@ NsTclCacheCmd(ClientData dummy, Tcl_Interp *interp, int objc,
     cmd = Tcl_GetString(objv[1]);
 
     if (STREQ(cmd, "create")) {
-	return CreateCmd(interp, objc, objv);
+	return CreateCmd(interp, servPtr, objc, objv);
     }
 
     else if (
@@ -1238,7 +1322,7 @@ NsTclCacheCmd(ClientData dummy, Tcl_Interp *interp, int objc,
 	    return TCL_ERROR;
 	}
 
-	cache = TclCacheFind(Tcl_GetString(objv[2]), &needsLocking);
+	cache = TclCacheFind(servPtr, Tcl_GetString(objv[2]), &needsLocking);
 	if (cache == NULL) {
 	    Tcl_AppendResult(interp, "no such cache: ",
 		Tcl_GetString(objv[2]), NULL);
@@ -1267,11 +1351,11 @@ NsTclCacheCmd(ClientData dummy, Tcl_Interp *interp, int objc,
  *
  * GlobalValueFree --
  *
- *      Free a GlobalValue. If vPtr->value == NULL, then the value is
- *      incomplete and some thread is still computing it. Simply set
- *      the flushed flag, but don't free the GlobalValue, so that thread
- *      can discover that its entry has been flushed. If vPtr->value !=
- *      NULL, then the value is complete and we can free the GlobalValue.
+ *  Free a GlobalValue. If vPtr->value == NULL, then the value is
+ *  incomplete and some thread is still computing it. Simply set
+ *  the flushed flag, but don't free the GlobalValue, so that thread
+ *  can discover that its entry has been flushed. If vPtr->value !=
+ *  NULL, then the value is complete and we can free the GlobalValue.
  *
  * Results:
  *	None.
@@ -1302,15 +1386,15 @@ GlobalValueFree(void *p)
  *
  * ThreadValueFree --
  *
- *      Free a value in a thread-private cache.  Such values are always
- *      Tcl_Obj pointers.
+ *  Free a value in a thread-private cache.  Such values are always
+ *  Tcl_Obj pointers.
  *
  * Results:
  *	None.
  *
  * Side effects:
- *      Decrements a Tcl_Obj reference count and possibly frees the
- *      object.
+ *  Decrements a Tcl_Obj reference count and possibly frees the
+ *  object.
  *
  *----------------------------------------------------------------------
  */
@@ -1328,13 +1412,13 @@ ThreadValueFree(void *p)
  *
  * CleanupThreadCache --
  *
- *      Delete a thread cache entirely.
+ *  Delete a thread cache entirely.
  *
  * Results:
  *	None.
  *
  * Side effects:
- *      None.
+ *  None.
  *
  *----------------------------------------------------------------------
  */
@@ -1347,4 +1431,45 @@ CleanupThreadCache(void *p)
     Ns_CacheDestroy(cache->nscache);
     ns_free(cache);
 }
+
+/*
+ *----------------------------------------------------------------------
+ *
+ * CacheFind --
+ *
+ *  Locates the cache for a virtual-server.
+ *
+ * Results:
+ *	The cache descriptor or NULL if no cache found.
+ *
+ * Side effects:
+ *  Per-thread cache may be created.
+ *
+ *----------------------------------------------------------------------
+ */
+
+static TclCache *
+CacheFind(Server *servPtr, char *name, int *needsLockingPtr)
+{
+    Tcl_HashEntry *hPtr;
+    TclCacheInfo  *info;
+    TclCache      *cache = NULL;
+
+    Ns_MutexLock(&servPtr->lock);
+    hPtr = Tcl_FindHashEntry(&servPtr->tclCaches, name);
+    if (hPtr != NULL) {
+	info = (TclCacheInfo *) Tcl_GetHashValue(hPtr);
+	if (info->globalCache != NULL) {
+	    cache = info->globalCache;
+	    *needsLockingPtr = NS_TRUE;
+	} else {
+	    cache = GetThreadCache(name, info);
+	    *needsLockingPtr = NS_FALSE;
+	}
+    }
+    Ns_MutexUnlock(&servPtr->lock);
+
+    return cache;
+}
+
 
