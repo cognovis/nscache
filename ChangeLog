@@ -1,3 +1,9 @@
+2003-05-07  Vlad Seryakov <vlad@crystalballinc.com>
+
+	* tclcache.c: Added pattern options to names command.
+
+	* intex.html: updated docs
+
 2003-03-16  Zoran Vasiljevic <zoran@archiware.com>
 
 	* tclcache.c: Integrated Don Baccus changes for virtual servers.

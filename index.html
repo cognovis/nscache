@@ -38,7 +38,7 @@
 	    <li><a href='#cmd-flush'><code>ns_cache flush <i>cachename</i> <i>key</i></code></a>
 	    <li><a href='#cmd-get'><code>ns_cache get <i>cachename</i> <i>key</i>
 		?<i>varname</i>?</code></a>
-	    <li><a href='#cmd-names'><code>ns_cache names <i>cachename</i></code></a>
+	    <li><a href='#cmd-names'><code>ns_cache names <i>cachename</i> ?<i>pattern</i>?</code></a>
 	    <li><a href='#cmd-set'><code>ns_cache set <i>cachename</i> <i>key</i> <i>value</i></code></a>
 	</ul>
 
@@ -404,12 +404,12 @@
 	<code>ns_cache get</code> is called for the same global cache and key,
 	then <code>ns_cache get</code> waits for the other thread to finish.
 
-	<p> <dt> <a name='cmd-names'><code>ns_cache names <i>cachename</i></code></a>
+	<p> <dt> <a name='cmd-names'><code>ns_cache names <i>cachename</i> ?<i>pattern</i>?</code></a>
 
 	<dd>
 
 	<p> This command returns a list of all keys currently in the
-	specified cache.
+	specified cache or the keys matched with optional pattern.
 
 	<p> If the cache is thread-private, then the list only includes
 	keys that are in the thread's private cache.
