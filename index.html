@@ -1,0 +1,478 @@
+<html>
+    <head>
+	<title>
+	    Tcl API for AOLserver Caches
+	</title>
+    </head>
+    <body>
+	<h2>Tcl API for AOLserver Caches</h2>
+	by <a href='mayoff@arsdigita.com'>Rob Mayoff</a>
+	<hr>
+
+	<p> This is nscache version @VER@.
+
+	<p> AOLserver implements a C API for caching arbitrary data. This
+	module provides a Tcl API on top of the C API. The module is
+	only compatible with <code>nsd8x</code>, not <code>nsd76</code>.
+
+	<p> A cache, in this context, is simply a dictionary that maps
+	keys to values.  Keys are always stored as NUL-terminated strings.
+	How values are stored depends on the type of cache.
+
+	<h4>Cache Types</h4>
+
+	<ul>
+	    <li><a href='#global-size'>Global Size-Limited Caches</a>
+	    <li><a href='#global-time'>Global Time-Limited Caches</a>
+	    <li><a href='#thread-size'>Thread-Private Size-Limited Caches</a>
+	</ul>
+
+	<h4>Cache Commands</h4>
+
+	<ul>
+	    <li><a href='#cmd-create'><code>ns_cache create <i>cachename</i>
+		?-size <i>maxsize</i>? ?-timeout <i>timeout</i>?
+		?-thread <i>thread</i>?</code></a>
+	    <li><a href='#cmd-eval'><code>ns_cache eval <i>cachename</i> <i>key</i>
+		<i>script</i></code></a>
+	    <li><a href='#cmd-flush'><code>ns_cache flush <i>cachename</i> <i>key</i></code></a>
+	    <li><a href='#cmd-get'><code>ns_cache get <i>cachename</i> <i>key</i>
+		?<i>varname</i>?</code></a>
+	    <li><a href='#cmd-names'><code>ns_cache names <i>cachename</i></code></a>
+	    <li><a href='#cmd-set'><code>ns_cache set <i>cachename</i> <i>key</i> <i>value</i></code></a>
+	</ul>
+
+	<h4><a href='#install'>Installing nscache</a></h4>
+	<h4><a href='#history'>Version History</a></h4>
+
+	<h3>Cache Types</h3>
+
+	Nscache supports three types of caches:
+
+	<dl>
+
+	<dt> <a name='global-size'>Global Size-Limited Cache</a>
+
+	<dd>
+
+	<blockquote><pre>ns_cache create <i>cachename</i> -size <i>maxsize</i></pre></blockquote>
+
+	<p> Entries in a cache of this type are accessible to all
+	threads.  Each cache has its own mutex that protects access to
+	its entries.
+
+	<p> Cache values are stored as counted strings, so
+	arbitrary binary data can be cached.  A global cache stores
+	strings instead of Tcl objects to prevent race conditions that
+	could lead to heap corruption.
+
+	<p> The cache has a maximum size specified when the
+	cache is created.  The size of the cache is the sum of the sizes
+	of all the values in the cache; keys do not count toward a
+	cache's size.  If inserting a value into the cache makes the
+	cache's size exceed its maximum, then cache entries are evicted
+	starting with the least-recently used entry until the size is
+	below the maximum size (or until only the new value remains in
+	the cache).
+
+	<p> <dt> <a name='global-time'>Global Time-Limited Cache</a>
+
+	<dd>
+
+	<blockquote><pre>ns_cache create <i>cachename</i> -timeout <i>timeout</i></pre></blockquote>
+
+	<p> Entries in a cache of this type are accessible to all
+	threads.  Each cache has its own mutex that protects access to
+	its entries.
+
+	<p> Cache values are stored as counted strings, as in
+	a global size-limited cache.
+
+	<p> The cache has a maximum entry lifetime, called its
+	<i>timeout</i>, specified (in
+	seconds) when the cache is created.  Every <i>timeout</i>
+	seconds, AOLserver flushes all cache entries that have not were
+	not created or accessed in the last <i>timeout</i> seconds.
+
+	<p> <dt> <a name='thread-size'>Thread-Private Size-Limited Cache</a>
+
+	<dd>
+
+	<blockquote><pre>ns_cache create <i>cachename</i> -size <i>maxsize</i> -thread 1</pre></blockquote>
+
+	<p> Each thread in AOLserver automatically gets its own private
+	cache named <i>cachename</i>.  Since a thread-private cache is
+	only accessed by one thread, access to it does not require a
+	mutex.  Entries in one thread's cache are not visible to any
+	other thread.
+
+	<p> Cache values are stored as Tcl objects.  When a value is
+	stored in the cache, nscache computes its string form and uses
+	the length of the string as the size of the value.
+
+	<p> The cache has a maximum size, like a global size-limited
+	cache.  However, because of the way the cache value sizes are
+	computed, the actual memory usage of the cache values may be
+	several times larger than <i>maxsize</i>.
+
+	<p> Thread-private caches may offer higher performance if the
+	cached values are complex objects such as lists or scripts, but
+	require more storage than global caches.
+
+	</dl>
+
+	<h3>Cache Commands</h3>
+
+	<dl>
+
+	<dt> <a name='cmd-create'><code>ns_cache create <i>cachename</i>
+	    ?-size <i>maxsize</i>? ?-timeout <i>timeout</i>?
+	    ?-thread <i>thread</i>?</code></a>
+
+	<dd>
+
+	<p> This command creates a new cache named <i>cachename</i>.  If
+	<i>thread</i> is given and is true, then it is a thread-private
+	cache.  Otherwise it is a global cache.
+	If <i>maxsize</i> is given, then it is a sized-based cache.
+	Otherwise, if <i>timeout</i> is given, then it is a
+	timeout-based cache.  Otherwise, it is a timeout-based cache
+	with an infinite timeout.
+
+	<p> This command returns nothing if it is successful.
+
+	<p>
+	<dt> <a name='cmd-eval'><code>ns_cache eval <i>cachename</i> <i>key</i>
+	    <i>script</i></code></a>
+
+	<dd> 
+
+	<p> This command atomically sets and gets a cache value.
+	First, it looks up <i>key</i> in the cache named <i>cachename</i>.
+	If it finds an entry, it returns the value of that entry.
+	Otherwise, it executes <i>script</i>, stores the return value
+	in the cache, and also returns that value.
+
+	<p> <i>Script</i> may optionally use the <code>return</code>
+	command to return its value.  For example, this will store the
+	value "2" in mycache, if mykey is not already present:
+
+	<blockquote><pre>ns_cache eval mycache mykey {
+    expr {1+1}
+}</pre></blockquote>
+
+	<p> This will also store the value "2" in mycache:
+
+	<blockquote><pre>ns_cache eval mycache mykey {
+    return [expr {1+1}]
+}</pre></blockquote>
+
+	<p> If <i>script</i> raises an error, or exits with
+	<code>break</code> or <code>continue</code>, then <code>ns_cache
+	eval</code> simply returns the same condition without modifying
+	the cache.
+
+	<p> This command is particularly useful for global caches
+	because of its atomicity.  Consider this definition:
+
+	<blockquote><pre>proc get_thing {key} {
+    ns_cache eval thing_cache $key {
+	# some long, expensive database operation that
+	# computes the value for $key
+    }
+}</pre></blockquote>
+
+	<p> Suppose thread 1 calls <code>get_thing A</code>, and
+	<code>A</code> is not found in <code>thing_cache</code>.  Thread
+	1 begins the long operation to compute the value for
+	<code>A</code>.  Meanwhile, thread 2 calls <code>get_thing
+	A</code>.  Thread 2 will not try to compute the value right
+	away.  Instead, it will block because thread 1 is already
+	computing the value.  When thread 1 finishes and stores the
+	value in the cache, thread 2 will then pull the value out of the
+	cache.  Meanwhile, if thread 3 calls <code>get_thing B</code>,
+	it proceeds independently from threads 1 and 2.  Here is a
+	diagram:
+
+	<p>
+	<table>
+	    <tr>
+		<th>Thread 1</th>
+		<th>Thread 2</th>
+		<th>Thread 3</th>
+	    </tr>
+	    <tr>
+		<td>calls <code>get_thing A</code></td>
+		<td>&nbsp;</td>
+		<td>&nbsp;</td>
+	    </tr>
+	    <tr>
+		<td>calls <code>ns_cache eval</code></td>
+		<td>&nbsp;</td>
+		<td>&nbsp;</td>
+	    </tr>
+	    <tr>
+		<td>begins long operation for A</td>
+		<td>&nbsp;</td>
+		<td>&nbsp;</td>
+	    </tr>
+	    <tr>
+		<td>(computing...)</td>
+		<td>calls <code>get_thing A</code></td>
+		<td>calls <code>get_thing B</code></td>
+	    </tr>
+	    <tr>
+		<td>(computing...)</td>
+		<td>calls <code>ns_cache eval</code></td>
+		<td>calls <code>ns_cache eval</code></td>
+	    </tr>
+	    <tr>
+		<td>(computing...)</td>
+		<td>waits for thread 1 to finish</td>
+		<td>begins long operation for B</td>
+	    </tr>
+	    <tr>
+		<td>(computing...)</td>
+		<td>(waiting...)</td>
+		<td>(computing...)</td>
+	    </tr>
+	    <tr>
+		<td>long operation returns value for A</td>
+		<td>(waiting...)</td>
+		<td>(computing...)</td>
+	    </tr>
+	    <tr>
+		<td><code>ns_cache eval</code> stores and returns value</td>
+		<td>(waiting...)</td>
+		<td>(computing...)</td>
+	    </tr>
+	    <tr>
+		<td><code>get_thing A</code> returns value</td>
+		<td><code>ns_cache eval</code> returns value</td>
+		<td>(computing...)</td>
+	    </tr>
+	    <tr>
+		<td>&nbsp;</td>
+		<td><code>get_thing A</code> returns value</td>
+		<td>long operation returns value for B</td>
+	    </tr>
+	    <tr>
+		<td>&nbsp;</td>
+		<td>&nbsp;</td>
+		<td><code>ns_cache eval</code> stores and returns value</td>
+	    </tr>
+	    <tr>
+		<td>&nbsp;</td>
+		<td>&nbsp;</td>
+		<td><code>get_thing B</code> returns value</td>
+	    </tr>
+	</table>
+
+	<p> <dt> <a name='cmd-flush'><code>ns_cache flush <i>cachename</i> <i>key</i></code></a>
+
+	<dd>
+
+	<p> This command removes the entry for <i>key</i> from the cache
+	named <i>cachename</i>.  If the cache has no entry for
+	<i>key</i>, then nothing happens.
+
+	<p> For global caches, <code>ns_cache flush</code> interacts
+	with <code>ns_cache eval</code>. Suppose thread 1 has called
+	<code>get_thing A</code> and is executing the long operation to
+	compute the value for A. Thread 2 calls <code>get_thing A</code> and
+	starts waiting for thread 1 to finish. Thread 3 calls <code>ns_cache
+	flush thing_cache A</code>. Thread 1 will continue executing the long
+	operation, but thread 2 will also start the long operation. When
+	thread 1 completes the long operation, <code>ns_cache eval</code>
+	returns the (now stale) value it computed, but it does <b>not</b>
+	store the value in the cache. When thread 2 completes the long
+	operation, <code>ns_cache eval</code> stores the (fresh) value it
+	computed in the cache and returns the fresh value. Here is a diagram:
+
+	<p>
+	<table>
+	    <tr>
+		<th>Thread 1</th>
+		<th>Thread 2</th>
+		<th>Thread 3</th>
+	    </tr>
+	    <tr>
+		<td>calls <code>get_thing A</code></td>
+		<td>&nbsp;</td>
+		<td>&nbsp;</td>
+	    </tr>
+	    <tr>
+		<td>calls <code>ns_cache eval</code></td>
+		<td>&nbsp;</td>
+		<td>&nbsp;</td>
+	    </tr>
+	    <tr>
+		<td>begins long operation for A</td>
+		<td>&nbsp;</td>
+		<td>&nbsp;</td>
+	    </tr>
+	    <tr>
+		<td>(computing...)</td>
+		<td>calls <code>get_thing A</code></td>
+		<td>&nbsp;</td>
+	    </tr>
+	    <tr>
+		<td>(computing...)</td>
+		<td>calls <code>ns_cache eval</code></td>
+		<td>&nbsp;</td>
+	    </tr>
+	    <tr>
+		<td>(computing...)</td>
+		<td>waits for thread 1 to finish</td>
+		<td>&nbsp;</td>
+	    </tr>
+	    <tr>
+		<td>(computing...)</td>
+		<td>(waiting...)</td>
+		<td>calls <code>ns_cache flush thing_cache A</code></td>
+	    </tr>
+	    <tr>
+		<td>(computing...)</td>
+		<td>begins long operation for A</td>
+		<td>&nbsp;</td>
+	    </tr>
+	    <tr>
+		<td>long operation returns stale value for A</td>
+		<td>(computing...)</td>
+		<td>&nbsp;</td>
+	    </tr>
+	    <tr>
+		<td><code>ns_cache eval</code> returns stale value</td>
+		<td>(computing...)</td>
+		<td>&nbsp;</td>
+	    </tr>
+	    <tr>
+		<td><code>get_thing A</code> returns stale value</td>
+		<td>long operation returns fresh value for A</td>
+		<td>&nbsp;</td>
+	    </tr>
+	    <tr>
+		<td>&nbsp;</td>
+		<td><code>ns_cache eval</code> stores and returns fresh value</td>
+		<td>&nbsp;</td>
+	    </tr>
+	    <tr>
+		<td>&nbsp;</td>
+		<td><code>get_thing A</code> returns fresh value</td>
+		<td>&nbsp;</td>
+	    </tr>
+	</table>
+
+	<p> <dt> <a name='cmd-get'><code>ns_cache get <i>cachename</i> <i>key</i>
+	    ?<i>varname</i>?</code></a>
+
+	<dd>
+
+	<p> This command looks up <i>key</i> in the specified cache.
+	It operates differently depending on whether <i>varname</i> was
+	given.
+
+	<table>
+	    <tr>
+		<td>&nbsp;</td>
+		<th><i>Varname</i> Not Given</th>
+		<th><i>Varname</i> Given</th>
+	    </tr>
+	    <tr>
+		<th>Key Not Found</td>
+		<td>Raises error</td>
+		<td>Returns "0"</td>
+	    </tr>
+	    <tr>
+		<th>Key Found</td>
+		<td>Returns value</td>
+		<td>Sets <i>varname</i> to value and returns "1"</td>
+	    </tr>
+	</table>
+
+	<p> If some other thread is in <code>ns_cache eval</code> when
+	<code>ns_cache get</code> is called for the same global cache and key,
+	then <code>ns_cache get</code> waits for the other thread to finish.
+
+	<p> <dt> <a name='cmd-names'><code>ns_cache names <i>cachename</i></code></a>
+
+	<dd>
+
+	<p> This command returns a list of all keys currently in the
+	specified cache.
+
+	<p> If the cache is thread-private, then the list only includes
+	keys that are in the thread's private cache.
+
+	<p> <dt> <a name='cmd-set'><code>ns_cache set <i>cachename</i> <i>key</i> <i>value</i></code></a>
+
+	<dd>
+
+	<p> This command stores <i>value</i> for <i>key</i> in the
+	specified cache.  It is roughly equivalent to this script:
+
+	<blockquote><pre>ns_cache flush <i>cachename</i> <i>key</i>
+ns_cache eval <i>cachename</i> <i>key</i> { return <i>value</i> }</pre></blockquote>
+
+	However, the <code>ns_cache set</code> command operates
+	atomically.
+
+	</dl>
+
+	<h3><a name='install'>Installing nscache</a></h3>
+
+	When you unpack the distribution file, you get a directory
+	named <code>nscache-@VER@</code>. Change into that directory
+	and run make. Be sure to tell make the path to your AOLserver
+	installation. For example, if your nsd8x executable is
+	<code>/usr/local/aolserver/bin/nsd8x</code>, then use these commands:
+
+	<blockquote><pre>tar xvzf nscache-@VER@.tar.gz
+cd nscache-@VER@
+make INST=/usr/local/aolserver</pre></blockquote>
+
+	The module should compile with no errors. You may optionally run the
+        test cases:
+
+	<blockquote><pre>make test INST=/usr/local/aolserver</pre></blockquote>
+
+	Examine the output for lines containing the string "test
+	outcome".  If any of those lines say "failure", something went
+	wrong.
+
+	<p> Next, install the module.
+
+	<blockquote><pre>make install INST=/usr/local/aolserver</pre></blockquote>
+
+	<p> To enable the module in your server, edit your
+	<code>nsd.tcl</code> or <code>nsd.ini</code>.  For
+	<code>nsd.tcl</code>, add these lines:
+
+	<blockquote><pre>ns_section ns/server/<i>server1</i>
+ns_param nscache nscache.so</pre></blockquote>
+
+	Use your own server name in place of <i>server1</i>.  For
+	<code>nsd.ini</code>, add these lines:
+
+	<blockquote><pre>[ns/server/<i>server1</i>]
+nscache=nscache.so</pre></blockquote>
+
+	Restart your server after saving the configuration file.  After
+	you have enabled the module, your Tcl scripts have access to the
+	<code>ns_cache</code> command.
+
+	<h3><a name='history'>Version History</a></h3>
+
+	<dl>
+	<dt> 2000-10-23: Version 1.1
+	<dd> Two bug fixes in argument parsing.  Thanks to Zoran
+	Vasiljevic.
+	<dt> 2000-10-19: Version 1.0
+	<dd> Initial release.
+	</dl>
+
+	<hr>
+	<a href='mayoff@arsdigita.com'><address>mayoff@arsdigita.com</address></a>
+	$Header$
+    </body>
+</html>
