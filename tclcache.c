@@ -599,12 +599,14 @@ NamesCmd(Ns_Cache *cache, int needsLocking, Tcl_Interp *interp, int objc,
     Ns_Entry       *ePtr;
     Tcl_Obj        *namePtr;
     Tcl_Obj        *resultPtr;
+    char           *pattern = 0;
+    char           *key;
     int             status;
 
-    if (objc != 3) {
+    if (objc < 3) {
 	Tcl_AppendResult(interp, "wrong # args: should be \"",
 	    Tcl_GetString(objv[0]), " ",
-	    Tcl_GetString(objv[1]), " cache\"", NULL);
+	    Tcl_GetString(objv[1]), " cache ?pattern?\"", NULL);
 	return TCL_ERROR;
     }
 
@@ -612,16 +614,20 @@ NamesCmd(Ns_Cache *cache, int needsLocking, Tcl_Interp *interp, int objc,
 	Ns_CacheLock(cache);
 
     status = TCL_OK;
+    if(objc > 3) pattern = Tcl_GetString(objv[3]);
     resultPtr = Tcl_GetObjResult(interp);
     ePtr = Ns_CacheFirstEntry(cache, &search);
 
     while (ePtr != NULL) {
-	namePtr = Tcl_NewStringObj(Ns_CacheKey(ePtr), -1);
-	if (Tcl_ListObjAppendElement(interp, resultPtr, namePtr) != TCL_OK) {
+        key = Ns_CacheKey(ePtr);
+        if(!pattern || Tcl_StringMatch(key,pattern)) {
+  	  namePtr = Tcl_NewStringObj(key, -1);
+	  if (Tcl_ListObjAppendElement(interp, resultPtr, namePtr) != TCL_OK) {
 	    Tcl_DecrRefCount(namePtr);
 	    status = TCL_ERROR;
 	    break;
-	}
+	  }
+        }
         ePtr = Ns_CacheNextEntry(&search);
     }
 
