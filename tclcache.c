@@ -100,12 +100,12 @@ typedef struct {
 
 /* Global symbols */
 
-int Ns_ModuleVersion = 1;
+NS_EXPORT int Ns_ModuleVersion = 1;
 
 /* Common cache, used for all virtual servers */
 static Server *commonCache;
 
-int Ns_ModuleInit(char *server, char *module);
+NS_EXPORT int Ns_ModuleInit(char *server, char *module);
 
 /* Private symbols */
 
